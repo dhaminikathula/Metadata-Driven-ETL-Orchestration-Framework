@@ -1,0 +1,83 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Metadata-Driven ETL Orchestration Framework
+# Services: db (PostgreSQL), mock-api (FastAPI), orchestrator (Python)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PostgreSQL – control database, source tables, and destination tables
+  # ───────────────────────────────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    container_name: etl_db
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      # Auto-run all *.sql files in alphabetical order on first start
+      - ./seeds:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Mock API – simulates a REST data source
+  # ───────────────────────────────────────────────────────────────────────────
+  mock-api:
+    build:
+      context: ./mock_api
+      dockerfile: Dockerfile
+    container_name: etl_mock_api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Orchestrator – reads metadata, runs pipelines
+  # ───────────────────────────────────────────────────────────────────────────
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    container_name: etl_orchestrator
+    restart: "no"
+    env_file: .env
+    environment:
+      DATABASE_URL:          ${DATABASE_URL}
+      MOCK_API_URL:          ${MOCK_API_URL}
+      ORCHESTRATOR_INTERVAL: ${ORCHESTRATOR_INTERVAL:-60}
+      RUN_ONCE:              ${RUN_ONCE:-false}
+    volumes:
+      # Mount the data directory so the CSV connector can read source_data.csv
+      - ./data:/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      mock-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  pgdata:
+    driver: local
